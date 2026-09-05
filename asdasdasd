@@ -1,5 +1,5 @@
 local function s1()
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Dark-mm2s/asdasdas/refs/heads/main/asdas"))()
+loadstring(game:HttpGet("https://www.astatine.vip/scripts/all_in_one.lua"))({"MTQ5MzgzMTQzNTI1MjEzODAzNA"})
 end
 local function s2()
 loadstring(game:HttpGet('https://raw.githubusercontent.com/renardofficiel/games/refs/heads/main/loader.lua', true))()
